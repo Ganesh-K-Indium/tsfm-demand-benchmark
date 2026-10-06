@@ -5,22 +5,22 @@ import lightgbm as lgb
 from mlforecast import MLForecast
 from mlforecast.lag_transforms import RollingMean
 
-from utils import HORIZON
+from config import CONFIG
+from utils import HORIZON, RuntimeTracker
 
 
-def main():
-    os.makedirs("./results", exist_ok=True)
-    df = pd.read_parquet("./data/m5_subset.parquet")
+def run_lightgbm() -> pd.DataFrame:
+    os.makedirs(CONFIG.results_dir, exist_ok=True)
+    df = pd.read_parquet(CONFIG.data_dir / "m5_subset.parquet")
 
     cutoff = df["ds"].max() - pd.Timedelta(days=HORIZON)
     hist = df[df["ds"] <= cutoff].copy()
     future = df[df["ds"] > cutoff].copy()
+    n_series = hist["unique_id"].nunique()
 
-    # Identify potential exogenous columns available in M5
+    # Categoricals
     candidate_cats = ["segment", "event_name_1", "event_type_1"]
     static_cats = [c for c in candidate_cats if c in df.columns]
-
-    # Convert categoricals to category dtype
     for c in static_cats:
         hist[c] = hist[c].astype("category")
         future[c] = future[c].astype("category")
@@ -29,11 +29,9 @@ def main():
     future_cov_candidates = ["dow", "month", "is_weekend", "snap_CA", "sell_price"]
     future_covs = [c for c in future_cov_candidates if c in df.columns]
 
-    # Dynamic features for future dataframe
     future_cols = ["unique_id", "ds"] + [c for c in (future_covs + static_cats) if c in future.columns]
     future_df = future[list(set(future_cols))].copy()
 
-    # Configure MLForecast
     lgb_params = {
         "n_estimators": 600,
         "learning_rate": 0.05,
@@ -56,24 +54,30 @@ def main():
         date_features=["dow", "month", "is_weekend"],
     )
 
-    print("Fitting LightGBM with business drivers & lag features...")
-    fcst.fit(
-        hist,
-        id_col="unique_id",
-        time_col="ds",
-        target_col="y",
-        static_features=static_cats,
-    )
+    print(f"Fitting LightGBM on {n_series} series with business drivers...")
+    with RuntimeTracker(model_name="LightGBM", n_series=n_series) as tracker:
+        fcst.fit(
+            hist,
+            id_col="unique_id",
+            time_col="ds",
+            target_col="y",
+            static_features=static_cats,
+        )
+        preds = fcst.predict(h=HORIZON, X_df=future_df)
 
-    preds = fcst.predict(h=HORIZON, X_df=future_df)
     preds = preds.rename(columns={"LGBMRegressor": "y_pred"})
     preds["model"] = "LightGBM"
     preds = preds[["unique_id", "ds", "model", "y_pred"]]
     preds["y_pred"] = preds["y_pred"].clip(lower=0)
 
-    out_path = "./results/lightgbm_forecast.parquet"
+    out_path = CONFIG.results_dir / "lightgbm_forecast.parquet"
     preds.to_parquet(out_path)
-    print(f"LightGBM saved to {out_path}")
+    print(f"LightGBM completed in {tracker.elapsed_sec:.2f}s ({tracker.throughput:.1f} series/s). Saved to {out_path}")
+    return preds
+
+
+def main():
+    run_lightgbm()
 
 
 if __name__ == "__main__":

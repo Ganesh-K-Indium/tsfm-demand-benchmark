@@ -1,9 +1,15 @@
+import json
+import os
+import time
 import numpy as np
 import pandas as pd
+import psutil
 import torch
 
-HORIZON = 28          # forecast horizon (M5 standard)
-SEASONALITY = 7       # weekly seasonality for daily data
+from config import CONFIG
+
+HORIZON = CONFIG.horizon
+SEASONALITY = CONFIG.seasonality
 FREQ = "D"
 
 
@@ -16,13 +22,77 @@ def get_device() -> str:
     return "cpu"
 
 
+class RuntimeTracker:
+    """Tracks latency, memory consumption, and series throughput for models."""
+
+    def __init__(self, model_name: str, n_series: int):
+        self.model_name = model_name
+        self.n_series = n_series
+        self.start_time = None
+        self.elapsed_sec = 0.0
+        self.initial_mem_mb = 0.0
+        self.peak_mem_mb = 0.0
+        self.device = get_device()
+
+    def __enter__(self):
+        process = psutil.Process(os.getpid())
+        self.initial_mem_mb = process.memory_info().rss / (1024 * 1024)
+        self.start_time = time.perf_counter()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.elapsed_sec = time.perf_counter() - self.start_time
+        process = psutil.Process(os.getpid())
+        current_mem = process.memory_info().rss / (1024 * 1024)
+        self.peak_mem_mb = max(self.initial_mem_mb, current_mem)
+        self.save_profile()
+
+    @property
+    def throughput(self) -> float:
+        """Series forecasted per second."""
+        return self.n_series / self.elapsed_sec if self.elapsed_sec > 0 else 0.0
+
+    @property
+    def latency_per_series_ms(self) -> float:
+        """Milliseconds elapsed per time series."""
+        return (self.elapsed_sec / self.n_series) * 1000 if self.n_series > 0 else 0.0
+
+    def to_dict(self) -> dict:
+        return {
+            "model": self.model_name,
+            "n_series": self.n_series,
+            "elapsed_seconds": round(self.elapsed_sec, 3),
+            "throughput_series_sec": round(self.throughput, 2),
+            "latency_ms_per_series": round(self.latency_per_series_ms, 2),
+            "peak_mem_mb": round(self.peak_mem_mb, 1),
+            "device": self.device,
+        }
+
+    def save_profile(self):
+        """Append runtime benchmark stats to results/runtime_profiles.json."""
+        os.makedirs(CONFIG.results_dir, exist_ok=True)
+        file_path = CONFIG.results_dir / "runtime_profiles.json"
+        data = {}
+        if file_path.exists():
+            try:
+                with open(file_path, "r") as f:
+                    data = json.load(f)
+            except Exception:
+                data = {}
+        data[self.model_name] = self.to_dict()
+        with open(file_path, "w") as f:
+            json.dump(data, f, indent=2)
+
+
 def wape(y_true, y_pred):
+    """Weighted Absolute Percentage Error (WAPE)."""
     y_true, y_pred = np.asarray(y_true, float), np.asarray(y_pred, float)
     denom = np.abs(y_true).sum()
     return float(np.abs(y_true - y_pred).sum() / denom) if denom > 0 else np.nan
 
 
 def rmse(y_true, y_pred):
+    """Root Mean Squared Error."""
     return float(np.sqrt(np.mean((np.asarray(y_true, float) - np.asarray(y_pred, float)) ** 2)))
 
 
@@ -32,6 +102,7 @@ def mase(y_true, y_pred, y_hist, seasonality=SEASONALITY):
     y_hist = np.asarray(y_hist, float)
     if len(y_hist) <= seasonality:
         return np.nan
+    # True seasonal lag difference: |y_t - y_{t-seasonality}|
     d = np.abs(y_hist[seasonality:] - y_hist[:-seasonality]).mean()
     if d == 0:
         return np.nan
@@ -80,7 +151,6 @@ def tag_segment(df: pd.DataFrame, cutoff=None) -> pd.DataFrame:
         return "fast"
 
     stats["segment"] = stats.apply(seg, axis=1)
-    # Remove existing segment column if present before merging
     base_df = df.drop(columns=["segment"], errors="ignore")
     return base_df.merge(stats[["segment"]], on="unique_id", how="left")
 

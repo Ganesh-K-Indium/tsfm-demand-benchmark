@@ -2,20 +2,21 @@
 import os
 import numpy as np
 import pandas as pd
-import torch
 from timesfm3 import TimesFM3Forecaster
 
-from utils import HORIZON, get_device
+from config import CONFIG
+from utils import HORIZON, RuntimeTracker, get_device
 
 MODEL_NAME = "google/timesfm-3.0-pytorch"
 
 
-def main():
-    os.makedirs("./results", exist_ok=True)
-    df = pd.read_parquet("./data/m5_subset.parquet")
+def run_timesfm() -> pd.DataFrame:
+    os.makedirs(CONFIG.results_dir, exist_ok=True)
+    df = pd.read_parquet(CONFIG.data_dir / "m5_subset.parquet")
 
     cutoff = df["ds"].max() - pd.Timedelta(days=HORIZON)
     hist = df[df["ds"] <= cutoff].copy()
+    n_series = hist["unique_id"].nunique()
 
     device = get_device()
     print(f"Loading TimesFM 3.0 ({MODEL_NAME}) on device: {device}...")
@@ -32,17 +33,17 @@ def main():
     uids = sorted(series.keys())
     contexts = [series[uid] for uid in uids]
 
-    print(f"Running TimesFM 3.0 inference on {len(uids)} series (horizon={HORIZON})...")
-    # predict_batch returns Iterator[ForecastOutput]
-    forecast_outputs = list(
-        forecaster.predict_batch(
-            contexts=contexts,
-            horizon=HORIZON,
-            ts_ids=uids,
-            return_quantiles=True,
-            make_positive=True,
+    print(f"Running TimesFM 3.0 inference on {len(uids)} series...")
+    with RuntimeTracker(model_name="TimesFM-3", n_series=n_series) as tracker:
+        forecast_outputs = list(
+            forecaster.predict_batch(
+                contexts=contexts,
+                horizon=HORIZON,
+                ts_ids=uids,
+                return_quantiles=True,
+                make_positive=True,
+            )
         )
-    )
 
     dates = pd.date_range(hist["ds"].max() + pd.Timedelta(days=1), periods=HORIZON, freq="D")
     rows = []
@@ -59,9 +60,14 @@ def main():
             rows.append((uid, d, "TimesFM-3", y_pred, q10, q90))
 
     out = pd.DataFrame(rows, columns=["unique_id", "ds", "model", "y_pred", "q10", "q90"])
-    out_path = "./results/timesfm_forecast.parquet"
+    out_path = CONFIG.results_dir / "timesfm_forecast.parquet"
     out.to_parquet(out_path)
-    print(f"TimesFM 3.0 forecast saved to {out_path}")
+    print(f"TimesFM 3.0 completed in {tracker.elapsed_sec:.2f}s ({tracker.throughput:.1f} series/s). Saved to {out_path}")
+    return out
+
+
+def main():
+    run_timesfm()
 
 
 if __name__ == "__main__":

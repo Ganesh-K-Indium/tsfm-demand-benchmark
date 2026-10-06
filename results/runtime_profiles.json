@@ -1,0 +1,11 @@
+{
+  "MockModel": {
+    "model": "MockModel",
+    "n_series": 10,
+    "elapsed_seconds": 0.0,
+    "throughput_series_sec": 5714289.72,
+    "latency_ms_per_series": 0.0,
+    "peak_mem_mb": 296.2,
+    "device": "mps"
+  }
+}
