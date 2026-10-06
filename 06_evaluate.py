@@ -1,4 +1,4 @@
-"""Comprehensive evaluation, visualization, and automated Markdown report generation."""
+"""Comprehensive evaluation, visualization, hierarchical aggregation, and automated report generation."""
 import json
 import os
 import matplotlib.pyplot as plt
@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 
 from config import CONFIG
-from utils import HORIZON, evaluate, wape
+from utils import HORIZON, evaluate, hierarchical_wape, log_experiment, wape
 
 
 def run_evaluation():
@@ -56,16 +56,21 @@ def run_evaluation():
     if runtime_df is not None:
         agg = agg.merge(runtime_df, on="model", how="left")
 
-    print("\n" + "=" * 60)
-    print("=== OVERALL BENCHMARK RESULTS ===")
-    print("=" * 60)
+    # Hierarchical Aggregation (Department and Store WAPE)
+    hier_results = hierarchical_wape(fcsts, actuals)
+    hier_df = pd.DataFrame.from_dict(hier_results, orient="index").reset_index().rename(columns={"index": "model"})
+    agg = agg.merge(hier_df, on="model", how="left")
+
+    print("\n" + "=" * 70)
+    print("=== OVERALL BENCHMARK RESULTS (WITH INVENTORY & HIERARCHY) ===")
+    print("=" * 70)
     print(agg.to_string(index=False))
 
-    print("\n" + "=" * 60)
+    print("\n" + "=" * 70)
     print("=== BREAKDOWN BY DEMAND VELOCITY SEGMENT ===")
-    print("=" * 60)
+    print("=" * 70)
     seg_summary = (
-        per_series.groupby(["segment", "model"])[["WAPE", "MASE"]]
+        per_series.groupby(["segment", "model"])[["WAPE", "MASE", "Inventory_Loss"]]
         .mean()
         .round(4)
         .unstack(level=0)
@@ -82,9 +87,12 @@ def run_evaluation():
     plot_macro_metrics(agg)
     plot_sample_series(df, fcsts, cutoff)
 
+    # Log experiment run to history
+    log_experiment(agg, extra_params={"n_series": df["unique_id"].nunique(), "horizon": HORIZON})
+
     # Generate comprehensive markdown report
     generate_markdown_report(agg, seg_summary, df, fcsts)
-    print(f"\nGenerated full benchmark report at {CONFIG.results_dir / 'BENCHMARK_REPORT.md'}")
+    print(f"\nSaved updated benchmark report to {CONFIG.results_dir / 'BENCHMARK_REPORT.md'}")
     return agg
 
 
@@ -110,10 +118,8 @@ def load_runtime_profiles() -> pd.DataFrame | None:
 
 
 def plot_macro_metrics(agg: pd.DataFrame):
-    """Plot WAPE, MASE, and Throughput comparisons."""
-    has_throughput = "throughput_s_sec" in agg.columns and agg["throughput_s_sec"].notna().any()
-    n_cols = 3 if has_throughput else 2
-    fig, axes = plt.subplots(1, n_cols, figsize=(5 * n_cols, 4.5))
+    """Plot WAPE, MASE, Inventory Loss, and Throughput comparisons."""
+    fig, axes = plt.subplots(1, 4, figsize=(20, 4.5))
 
     models = agg["model"].tolist()
     colors = ["#4C72B0", "#55A868", "#C44E52", "#8172B3", "#CCB974", "#64B5CD"][:len(models)]
@@ -134,13 +140,21 @@ def plot_macro_metrics(agg: pd.DataFrame):
     axes[1].tick_params(axis="x", rotation=25)
     axes[1].legend()
 
-    # 3. Throughput
-    if has_throughput:
-        axes[2].bar(models, agg["throughput_s_sec"], color=colors, alpha=0.85, edgecolor="black")
-        axes[2].set_title("Throughput (Series/Sec, Higher is Better)", fontweight="bold")
-        axes[2].set_ylabel("Series / Sec")
+    # 3. Asymmetric Inventory Loss
+    if "Inventory_Loss" in agg.columns:
+        axes[2].bar(models, agg["Inventory_Loss"], color=colors, alpha=0.85, edgecolor="black")
+        axes[2].set_title("Inventory Loss (Cu=3, Co=1)", fontweight="bold")
+        axes[2].set_ylabel("Cost Units / Item")
         axes[2].grid(axis="y", linestyle="--", alpha=0.5)
         axes[2].tick_params(axis="x", rotation=25)
+
+    # 4. Throughput
+    if "throughput_s_sec" in agg.columns and agg["throughput_s_sec"].notna().any():
+        axes[3].bar(models, agg["throughput_s_sec"], color=colors, alpha=0.85, edgecolor="black")
+        axes[3].set_title("Throughput (Higher is Better)", fontweight="bold")
+        axes[3].set_ylabel("Series / Sec")
+        axes[3].grid(axis="y", linestyle="--", alpha=0.5)
+        axes[3].tick_params(axis="x", rotation=25)
 
     plt.tight_layout()
     chart_path = CONFIG.results_dir / "benchmark_comparison.png"
@@ -156,7 +170,6 @@ def plot_sample_series(df: pd.DataFrame, fcsts: pd.DataFrame, cutoff: pd.Timesta
     if n_segs == 1:
         axes = [axes]
 
-    # Show 56 days of history prior to cutoff
     hist_start = cutoff - pd.Timedelta(days=56)
 
     for ax, seg_name in zip(axes, segments):
@@ -177,7 +190,6 @@ def plot_sample_series(df: pd.DataFrame, fcsts: pd.DataFrame, cutoff: pd.Timesta
             color = palette.get(model_name, None)
             ax.plot(m_df["ds"], m_df["y_pred"], label=f"{model_name}", linewidth=1.8, color=color)
 
-            # Shaded 80% prediction interval if available
             if "q10" in m_df.columns and "q90" in m_df.columns and m_df["q10"].notna().any():
                 ax.fill_between(m_df["ds"], m_df["q10"], m_df["q90"], alpha=0.15, color=color)
 
@@ -209,24 +221,27 @@ Generated automatically by `tsfm-demand-benchmark`.
 
 ---
 
-## 1. Overall Performance
+## 1. Overall Performance Leaderboard
 
-| Model | WAPE | MASE | RMSE | Throughput (series/s) | Peak RAM (MB) |
-| :--- | :--- | :--- | :--- | :--- | :--- |
+| Model | WAPE | MASE | RMSE | Inv. Loss (Cu=3, Co=1) | Dept WAPE | Store WAPE | Throughput (s/s) |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 """
     for _, r in agg.iterrows():
+        inv = f"{r['Inventory_Loss']:.3f}" if "Inventory_Loss" in r and pd.notna(r["Inventory_Loss"]) else "N/A"
+        dept = f"{r['Dept_WAPE']:.4f}" if "Dept_WAPE" in r and pd.notna(r["Dept_WAPE"]) else "N/A"
+        store = f"{r['Store_WAPE']:.4f}" if "Store_WAPE" in r and pd.notna(r["Store_WAPE"]) else "N/A"
         tp = f"{r['throughput_s_sec']:.1f}" if "throughput_s_sec" in r and pd.notna(r["throughput_s_sec"]) else "N/A"
-        mem = f"{r['peak_mem_mb']:.1f}" if "peak_mem_mb" in r and pd.notna(r["peak_mem_mb"]) else "N/A"
-        report += f"| **{r['model']}** | {r['WAPE']:.4f} | {r['MASE']:.4f} | {r['RMSE']:.4f} | {tp} | {mem} |\n"
+        report += f"| **{r['model']}** | {r['WAPE']:.4f} | {r['MASE']:.4f} | {r['RMSE']:.4f} | {inv} | {dept} | {store} | {tp} |\n"
 
     report += """
-> [!NOTE]
-> - **WAPE:** Lower is better. Scale-independent aggregate volume error.
-> - **MASE:** Lower is better. $\\text{MASE} < 1.0$ indicates superior performance over Seasonal Naive.
+> [!TIP]
+> - **WAPE & MASE:** Measure point forecast precision.
+> - **Inventory Loss:** Asymmetric Newsvendor cost penalizing stockouts 3x more heavily than overstock.
+> - **Dept & Store WAPE:** Measures whether individual item forecasts sum coherently at aggregate levels.
 
 ---
 
-## 2. Visual Performance Comparison
+## 2. Macro Performance & Efficiency Charts
 
 ![Benchmark Comparison](benchmark_comparison.png)
 
@@ -238,7 +253,7 @@ Generated automatically by `tsfm-demand-benchmark`.
 
 ---
 
-## 4. Performance by Velocity Segment (WAPE / MASE)
+## 4. Performance Breakdown by Velocity Segment
 
 ```
 """ + seg_summary.to_string() + """

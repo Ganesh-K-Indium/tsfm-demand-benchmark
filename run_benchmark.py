@@ -36,6 +36,24 @@ def main():
         help="Comma-separated list of models to evaluate: 'all', 'baselines', 'lightgbm', 'chronos', 'timesfm'",
     )
     parser.add_argument(
+        "--understock-cost",
+        type=float,
+        default=CONFIG.understock_cost,
+        help="Asymmetric inventory loss penalty for lost sales / stockouts (Cu)",
+    )
+    parser.add_argument(
+        "--overstock-cost",
+        type=float,
+        default=CONFIG.overstock_cost,
+        help="Asymmetric inventory loss penalty for excess holding / markdown (Co)",
+    )
+    parser.add_argument(
+        "--n-windows",
+        type=int,
+        default=CONFIG.n_windows,
+        help="Number of backtesting evaluation windows (1 for single holdout, 2-3 for rolling origin)",
+    )
+    parser.add_argument(
         "--skip-prep",
         action="store_true",
         help="Skip 01_prepare_data.py if data/m5_subset.parquet already exists",
@@ -46,6 +64,11 @@ def main():
         help="Skip forecasting and run evaluation on existing results in results/",
     )
     args = parser.parse_args()
+
+    # Update global config
+    CONFIG.understock_cost = args.understock_cost
+    CONFIG.overstock_cost = args.overstock_cost
+    CONFIG.n_windows = args.n_windows
 
     total_start = time.perf_counter()
     device = get_device()

@@ -60,8 +60,8 @@ def run_chronos() -> pd.DataFrame:
                 "ds": fcst_df["ds"],
                 "model": "Chronos-2",
                 "y_pred": fcst_df["predictions"].clip(lower=0),
-                "q10": fcst_df[0.1].clip(lower=0),
-                "q90": fcst_df[0.9].clip(lower=0),
+                "q10": (fcst_df["0.1"] if "0.1" in fcst_df.columns else fcst_df[0.1]).clip(lower=0),
+                "q90": (fcst_df["0.9"] if "0.9" in fcst_df.columns else fcst_df[0.9]).clip(lower=0),
             })
         else:
             series = {

@@ -1,3 +1,4 @@
+from datetime import datetime
 import json
 import os
 import time
@@ -20,6 +21,11 @@ def get_device() -> str:
     if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
         return "mps"
     return "cpu"
+
+
+def get_rolling_cutoffs(max_date: pd.Timestamp, horizon: int = HORIZON, n_windows: int = 1) -> list[pd.Timestamp]:
+    """Generate rolling-origin cutoff dates for multi-window backtesting."""
+    return [max_date - pd.Timedelta(int(horizon * (i + 1)), unit="D") for i in reversed(range(n_windows))]
 
 
 class RuntimeTracker:
@@ -102,11 +108,23 @@ def mase(y_true, y_pred, y_hist, seasonality=SEASONALITY):
     y_hist = np.asarray(y_hist, float)
     if len(y_hist) <= seasonality:
         return np.nan
-    # True seasonal lag difference: |y_t - y_{t-seasonality}|
     d = np.abs(y_hist[seasonality:] - y_hist[:-seasonality]).mean()
     if d == 0:
         return np.nan
     return float(np.abs(y_true - y_pred).mean() / d)
+
+
+def asymmetric_inventory_loss(y_true, y_pred, understock_cost=CONFIG.understock_cost, overstock_cost=CONFIG.overstock_cost):
+    """
+    Newsvendor Inventory Loss Function:
+    Penalizes stockouts (under-forecasting) at understock_cost ($C_u$) and
+    overstocking (excess inventory holding + markdowns) at overstock_cost ($C_o$).
+    """
+    y_true, y_pred = np.asarray(y_true, float), np.asarray(y_pred, float)
+    understock_err = np.maximum(0.0, y_true - y_pred)
+    overstock_err = np.maximum(0.0, y_pred - y_true)
+    total_loss = (understock_cost * understock_err) + (overstock_cost * overstock_err)
+    return float(np.mean(total_loss))
 
 
 def interval_coverage(y_true, q_low, q_high):
@@ -119,10 +137,7 @@ def interval_coverage(y_true, q_low, q_high):
 
 
 def winkler_score(y_true, q_low, q_high, alpha=0.2):
-    """
-    Winkler score for (1 - alpha) prediction interval (e.g. 80% interval: alpha = 0.2).
-    Penalizes width of interval and deviations when true value falls outside.
-    """
+    """Winkler score for (1 - alpha) prediction interval (e.g. 80% interval: alpha = 0.2)."""
     y_true = np.asarray(y_true, float)
     l = np.asarray(q_low, float)
     u = np.asarray(q_high, float)
@@ -133,11 +148,7 @@ def winkler_score(y_true, q_low, q_high, alpha=0.2):
 
 
 def tag_segment(df: pd.DataFrame, cutoff=None) -> pd.DataFrame:
-    """
-    Segment each series: fast / slow / intermittent.
-    If cutoff is provided, segmentation metrics are calculated strictly on data prior to cutoff
-    to prevent lookahead data leakage.
-    """
+    """Segment each series: fast / slow / intermittent without lookahead data leakage."""
     source_df = df if cutoff is None else df[df["ds"] <= cutoff]
     stats = source_df.groupby("unique_id")["y"].agg(
         mean_y="mean", zero_frac=lambda x: (x == 0).mean()
@@ -155,13 +166,33 @@ def tag_segment(df: pd.DataFrame, cutoff=None) -> pd.DataFrame:
     return base_df.merge(stats[["segment"]], on="unique_id", how="left")
 
 
+def hierarchical_wape(forecast: pd.DataFrame, actuals: pd.DataFrame) -> dict[str, float]:
+    """Compute bottom-up aggregate WAPE at Department and Store levels."""
+    df = forecast.merge(actuals, on=["unique_id", "ds"], how="inner")
+    # unique_id format: "FOODS_3_090_CA_1" -> dept: "FOODS_3", store: "CA_1"
+    df["dept"] = df["unique_id"].str.rsplit("_", n=2).str[0]
+    df["store"] = df["unique_id"].str.rsplit("_", n=2).str[-1]
+
+    results = {}
+    for model, m_df in df.groupby("model"):
+        # Department level aggregation
+        dept_agg = m_df.groupby(["dept", "ds"])[["y", "y_pred"]].sum()
+        dept_w = wape(dept_agg["y"], dept_agg["y_pred"])
+
+        # Store level aggregation
+        store_agg = m_df.groupby(["store", "ds"])[["y", "y_pred"]].sum()
+        store_w = wape(store_agg["y"], store_agg["y_pred"])
+
+        results[model] = {
+            "Dept_WAPE": round(dept_w, 4),
+            "Store_WAPE": round(store_w, 4),
+        }
+    return results
+
+
 def evaluate(forecast: pd.DataFrame, actuals: pd.DataFrame,
              y_hist_by_id: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    forecast : columns [unique_id, ds, model, y_pred, (optional: q10, q90)]
-    actuals  : columns [unique_id, ds, y]
-    y_hist_by_id : dict unique_id -> 1D array of train history (ds <= cutoff)
-    """
+    """Comprehensive evaluation including WAPE, MASE, RMSE, and Asymmetric Inventory Loss."""
     df = forecast.merge(actuals, on=["unique_id", "ds"], how="inner")
     rows = []
     has_intervals = "q10" in df.columns and "q90" in df.columns
@@ -174,6 +205,7 @@ def evaluate(forecast: pd.DataFrame, actuals: pd.DataFrame,
             "WAPE": wape(g["y"], g["y_pred"]),
             "MASE": mase(g["y"], g["y_pred"], y_hist),
             "RMSE": rmse(g["y"], g["y_pred"]),
+            "Inventory_Loss": asymmetric_inventory_loss(g["y"], g["y_pred"]),
         }
         if has_intervals and g["q10"].notna().all() and g["q90"].notna().all():
             res["Coverage_80"] = interval_coverage(g["y"], g["q10"], g["q90"])
@@ -181,7 +213,12 @@ def evaluate(forecast: pd.DataFrame, actuals: pd.DataFrame,
         rows.append(res)
 
     per_series = pd.DataFrame(rows)
-    agg_dict = {"WAPE": "mean", "MASE": "mean", "RMSE": "mean"}
+    agg_dict = {
+        "WAPE": "mean",
+        "MASE": "mean",
+        "RMSE": "mean",
+        "Inventory_Loss": "mean",
+    }
     if "Coverage_80" in per_series.columns:
         agg_dict["Coverage_80"] = "mean"
         agg_dict["Winkler_80"] = "mean"
@@ -193,3 +230,26 @@ def evaluate(forecast: pd.DataFrame, actuals: pd.DataFrame,
         .reset_index()
     )
     return agg, per_series
+
+
+def log_experiment(agg_df: pd.DataFrame, extra_params: dict | None = None):
+    """Log experiment execution to results/experiment_history.json."""
+    os.makedirs(CONFIG.results_dir, exist_ok=True)
+    history_file = CONFIG.results_dir / "experiment_history.json"
+    history = []
+    if history_file.exists():
+        try:
+            with open(history_file, "r") as f:
+                history = json.load(f)
+        except Exception:
+            history = []
+
+    run_record = {
+        "timestamp": datetime.now().isoformat(),
+        "device": get_device(),
+        "params": extra_params or {},
+        "results": agg_df.to_dict(orient="records"),
+    }
+    history.append(run_record)
+    with open(history_file, "w") as f:
+        json.dump(history, f, indent=2)

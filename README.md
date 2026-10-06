@@ -18,13 +18,13 @@ A modular, reproducible, publication-grade benchmark evaluating state-of-the-art
 ## 📊 Evaluation & Metrics
 
 Standardized against retail demand forecasting best practices across a **28-day horizon**:
-- **WAPE (Weighted Absolute Percentage Error):** Scale-independent aggregate volume accuracy.
-- **MASE (Mean Absolute Scaled Error):** Accuracy scaled against seasonal naive history ($\text{MASE} < 1.0$ beats seasonal naive).
-- **RMSE (Root Mean Squared Error):** Heavily penalizes large stockout errors.
-- **Efficiency & Resource Footprint:** Throughput (series/sec), P95 latency (ms/series), and peak RAM/GPU memory.
-- **Velocity Segmentation:** Breakdown by demand profile (*fast*, *slow*, and *intermittent*).
+- **Point Accuracy:** WAPE (volume error), MASE (relative to seasonal naive), RMSE (squared error penalty).
+- **Asymmetric Inventory Loss (Newsvendor Cost):** Penalizes stockouts ($C_u = 3.0$) $3\times$ higher than overstocking ($C_o = 1.0$) to measure real supply chain dollar impact.
+- **Hierarchical Coherence:** Aggregates item forecasts to Department and Store levels to measure multi-level error propagation.
+- **Probabilistic Calibration:** 80% prediction interval coverage rate and Winkler score.
+- **Efficiency & Resource Footprint:** Throughput (series/sec), P95 latency (ms/series), and peak RAM memory.
+- **Velocity Segmentation:** Breakdown by demand velocity (*Fast*, *Slow*, and *Intermittent* zero-inflated series).
 - **Horizon Bucketing:** Breakdown by horizon (*1–7d*, *8–14d*, and *15–28d*).
-- **Probabilistic Intervals:** 80% prediction interval coverage and Winkler score.
 
 ---
 
@@ -47,25 +47,20 @@ python run_benchmark.py --preset smoke
 # Standard benchmark (~168 series across all product departments)
 python run_benchmark.py --preset standard
 
-# Run specific models (e.g. LightGBM vs TimesFM 3.0)
+# Customize supply chain inventory loss penalties
+python run_benchmark.py --understock-cost 4.0 --overstock-cost 1.0
+
+# Multi-window rolling-origin backtesting (2 rolling cutoffs)
+python run_benchmark.py --n-windows 2
+
+# Benchmark specific models (e.g. LightGBM vs TimesFM 3.0)
 python run_benchmark.py --models lightgbm,timesfm --skip-prep
 
 # Re-evaluate existing results and regenerate charts
 python run_benchmark.py --evaluate-only
 ```
 
-### 3. Step-by-Step Script Execution (Alternative)
-Each module can also be run independently:
-```bash
-python 01_prepare_data.py --preset small
-python 02_baselines.py
-python 03_lightgbm.py
-python 04_chronos.py
-python 05_timesfm.py
-python 06_evaluate.py
-```
-
-### 4. Run Unit Tests
+### 3. Run Unit Tests
 ```bash
 pytest
 ```
@@ -76,6 +71,7 @@ pytest
 
 After execution, all metrics and visualizations are saved to `./results/`:
 - **`results/BENCHMARK_REPORT.md`**: Publication-ready Markdown summary with performance and efficiency tables.
-- **`results/benchmark_comparison.png`**: Macro comparison bar charts (WAPE, MASE, and series throughput).
+- **`results/benchmark_comparison.png`**: Macro comparison bar charts (WAPE, MASE, Inventory Loss, and Series Throughput).
 - **`results/sample_series_forecasts.png`**: Time-series charts comparing actual sales with model predictions and shaded 10%–90% prediction intervals across Fast, Slow, and Intermittent demand segments.
+- **`results/experiment_history.json`**: Historical record of benchmark runs, parameters, and results.
 - **`results/benchmark_summary.csv`** & **`results/runtime_profiles.json`**: Raw metrics for downstream analysis.
