@@ -31,6 +31,12 @@ def main():
         help="Dataset scale preset: smoke (~14 series), small (~56), standard (~168), extended (~525)",
     )
     parser.add_argument(
+        "--dataset",
+        choices=["m5", "tech_gadget"],
+        default="m5",
+        help="Dataset: Walmart M5 (daily) or the authors' tech-gadget retail panel (weekly)",
+    )
+    parser.add_argument(
         "--models",
         default="all",
         help="Comma-separated list of models to evaluate: 'all', 'baselines', 'lightgbm', 'chronos', 'timesfm'",
@@ -56,7 +62,7 @@ def main():
     parser.add_argument(
         "--skip-prep",
         action="store_true",
-        help="Skip 01_prepare_data.py if data/m5_subset.parquet already exists",
+        help="Skip preparation if the selected dataset's prepared parquet already exists",
     )
     parser.add_argument(
         "--evaluate-only",
@@ -66,6 +72,7 @@ def main():
     args = parser.parse_args()
 
     # Update global config
+    CONFIG.configure_dataset(args.dataset)
     CONFIG.understock_cost = args.understock_cost
     CONFIG.overstock_cost = args.overstock_cost
     CONFIG.n_windows = args.n_windows
@@ -81,13 +88,13 @@ def main():
         return
 
     # 1. Data Preparation
-    data_file = CONFIG.data_dir / "m5_subset.parquet"
+    data_file = CONFIG.prepared_data_path
     if args.skip_prep and data_file.exists():
         log(f"Found existing dataset at {data_file}, skipping preparation.")
     else:
-        log("Step 1/6: Preparing balanced M5 subset with business covariates...")
+        log(f"Step 1/6: Preparing {CONFIG.dataset} data with business covariates...")
         prep_mod = importlib.import_module("01_prepare_data")
-        prep_mod.prepare_data(preset=args.preset)
+        prep_mod.prepare_data(preset=args.preset, dataset=args.dataset)
 
     selected_models = [m.strip().lower() for m in args.models.split(",")]
     run_all = "all" in selected_models
@@ -127,4 +134,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

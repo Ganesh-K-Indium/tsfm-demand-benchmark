@@ -77,6 +77,9 @@ python run_benchmark.py --preset smoke
 # 📊 Standard benchmark (~168 series across all product categories)
 python run_benchmark.py --preset standard
 
+# 🔌 Consumer-electronics-adjacent tech-gadget dataset (44 weekly SKU series)
+python run_benchmark.py --dataset tech_gadget
+
 # 🎯 Isolate specific models (e.g. LightGBM vs TimesFM 3.0)
 python run_benchmark.py --models lightgbm,timesfm --skip-prep
 
@@ -94,7 +97,7 @@ pytest
 
 ## 📊 Evaluation Framework
 
-Standardized against retail supply chain best practices over a **28-day holdout horizon**:
+Evaluation uses a 28-day daily horizon for M5 and a 13-week horizon for the tech-gadget dataset:
 
 ### **1. Accuracy & Volume Metrics**
 * **WAPE (Weighted Absolute Percentage Error):** Volume-weighted percentage error across all SKUs.
@@ -107,7 +110,7 @@ Standardized against retail supply chain best practices over a **28-day holdout 
   Stockout / lost margin penalty ($C_u = \$3.0$) is weighted $3\times$ higher than overstock holding/markdown loss ($C_o = \$1.0$).
 
 ### **3. Hierarchical Coherence**
-* **Department & Store Level WAPE:** Aggregates SKU forecasts to category and store levels to test multi-level error propagation.
+* **Hierarchy WAPE:** Aggregates M5 SKU forecasts to department/store levels and gadget forecasts to functionality/vendor levels.
 
 ### **4. Operational Efficiency & Compute**
 * **Throughput:** Time series forecasted per second.
@@ -118,7 +121,7 @@ Standardized against retail supply chain best practices over a **28-day holdout 
 
 ## 📈 Generated Artifacts
 
-Execution automatically generates publication-grade outputs in `./results/`:
+Execution automatically generates outputs in `./results/` for M5 and `./results/tech_gadget/` for the gadget dataset:
 
 ```
 results/
@@ -138,6 +141,7 @@ results/
 
 ```bash
 usage: run_benchmark.py [-h] [--preset {smoke,small,standard,extended}]
+                        [--dataset {m5,tech_gadget}]
                         [--models MODELS] [--understock-cost UNDERSTOCK_COST]
                         [--overstock-cost OVERSTOCK_COST]
                         [--n-windows N_WINDOWS] [--skip-prep]
@@ -146,15 +150,22 @@ usage: run_benchmark.py [-h] [--preset {smoke,small,standard,extended}]
 options:
   -h, --help            Show this help message and exit
   --preset PRESET       Dataset scale preset: smoke (~14 series), small (~56), standard (~168), extended (~525) (default: small)
+  --dataset DATASET     Dataset: M5 daily retail or tech_gadget weekly retail (default: m5)
   --models MODELS       Comma-separated list of models: 'all', 'baselines', 'lightgbm', 'chronos', 'timesfm' (default: all)
   --understock-cost CU  Asymmetric inventory loss penalty for lost sales / stockouts (default: 3.0)
   --overstock-cost CO   Asymmetric inventory loss penalty for excess holding / markdown (default: 1.0)
   --n-windows N         Number of backtesting evaluation windows (1 for holdout, 2-3 for rolling origin) (default: 1)
-  --skip-prep           Skip data preparation if data/m5_subset.parquet already exists (default: False)
+  --skip-prep           Skip data preparation if the selected dataset parquet already exists (default: False)
   --evaluate-only       Skip forecasting and evaluate existing result files in results/ (default: False)
 ```
 
 </details>
+
+### Tech-gadget retail dataset
+
+`--dataset tech_gadget` downloads the authors' raw CSV from the [Demand Prediction in Retail dataset page](https://demandprediction.github.io/dataset.html), validates its SKU/week panel, and saves the normalized data to `data/tech_gadget.parquet`. The dataset contains 44 tech-gadget SKUs with 100 weekly observations each (October 2016–September 2018), including sales, price, homepage-feature status, color, vendor, and functionality. The pipeline uses all 44 series, a 13-week forecast horizon, and 52-week seasonal scaling; it saves outputs under `results/tech_gadget/` so they do not overwrite M5 results.
+
+The benchmark assumes future prices and homepage-feature flags are known for the 13-week forecast horizon. This is a useful what-if/planned-covariate setup, but it should be reported explicitly because those values come from the historical source data. The raw source's color value changes within some SKU histories, so color is retained for inspection but excluded as a static model feature. The dataset page asks users to cite Cohen, Gras, Pentecoste, and Zhang (2022), *Demand Prediction in Retail: A Practical Guide to Leverage Data and Predictive Analytics*. The page does not state a clear reuse license; verify terms before redistributing the raw data or derived files.
 
 <details>
 <summary><b>📁 Project Directory Structure</b></summary>

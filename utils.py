@@ -11,7 +11,7 @@ from config import CONFIG
 
 HORIZON = CONFIG.horizon
 SEASONALITY = CONFIG.seasonality
-FREQ = "D"
+FREQ = CONFIG.frequency
 
 
 def get_device() -> str:
@@ -23,13 +23,31 @@ def get_device() -> str:
     return "cpu"
 
 
-def get_rolling_cutoffs(max_date: pd.Timestamp, horizon: int = HORIZON, n_windows: int = 1) -> list[pd.Timestamp]:
+def get_rolling_cutoffs(max_date: pd.Timestamp, horizon: int | None = None, n_windows: int = 1,
+                        freq: str | None = None) -> list[pd.Timestamp]:
     """Generate rolling-origin cutoff dates for multi-window backtesting."""
+    horizon = CONFIG.horizon if horizon is None else horizon
+    freq = CONFIG.frequency if freq is None else freq
     if horizon <= 0:
         raise ValueError("horizon must be positive")
     if n_windows <= 0:
         raise ValueError("n_windows must be positive")
-    return [max_date - pd.Timedelta(int(horizon * (i + 1)), unit="D") for i in reversed(range(n_windows))]
+    offset = pd.tseries.frequencies.to_offset(freq)
+    return [max_date - int(horizon * (i + 1)) * offset for i in reversed(range(n_windows))]
+
+
+def forecast_end(cutoff: pd.Timestamp, horizon: int | None = None, freq: str | None = None) -> pd.Timestamp:
+    """Return the final timestamp covered by a forecast window."""
+    horizon = CONFIG.horizon if horizon is None else horizon
+    freq = CONFIG.frequency if freq is None else freq
+    return cutoff + int(horizon) * pd.tseries.frequencies.to_offset(freq)
+
+
+def future_dates(cutoff: pd.Timestamp, horizon: int | None = None, freq: str | None = None) -> pd.DatetimeIndex:
+    """Create forecast timestamps at the configured dataset cadence."""
+    horizon = CONFIG.horizon if horizon is None else horizon
+    freq = CONFIG.frequency if freq is None else freq
+    return pd.date_range(start=cutoff + pd.tseries.frequencies.to_offset(freq), periods=horizon, freq=freq)
 
 
 class RuntimeTracker:
@@ -106,8 +124,9 @@ def rmse(y_true, y_pred):
     return float(np.sqrt(np.mean((np.asarray(y_true, float) - np.asarray(y_pred, float)) ** 2)))
 
 
-def mase(y_true, y_pred, y_hist, seasonality=SEASONALITY):
+def mase(y_true, y_pred, y_hist, seasonality=None):
     """MASE w.r.t. seasonal naive on the history available at forecast time."""
+    seasonality = CONFIG.seasonality if seasonality is None else seasonality
     y_true, y_pred = np.asarray(y_true, float), np.asarray(y_pred, float)
     y_hist = np.asarray(y_hist, float)
     if len(y_hist) <= seasonality:
@@ -171,26 +190,25 @@ def tag_segment(df: pd.DataFrame, cutoff=None) -> pd.DataFrame:
 
 
 def hierarchical_wape(forecast: pd.DataFrame, actuals: pd.DataFrame) -> dict[str, float]:
-    """Compute bottom-up aggregate WAPE at Department and Store levels."""
+    """Compute bottom-up WAPE over available product/store hierarchies."""
     df = forecast.merge(actuals, on=["unique_id", "ds"], how="inner")
-    # unique_id format: "FOODS_3_090_CA_1" -> dept: "FOODS_3", store: "CA_1"
-    df["dept"] = df["unique_id"].str.rsplit("_", n=2).str[0]
-    df["store"] = df["unique_id"].str.rsplit("_", n=2).str[-1]
+    if CONFIG.dataset == "m5":
+        # M5 identifiers encode hierarchy, but prefer explicit metadata where present.
+        if "dept_id" not in df:
+            df["dept_id"] = df["unique_id"].str.rsplit("_", n=2).str[0]
+        if "store_id" not in df:
+            df["store_id"] = df["unique_id"].str.rsplit("_", n=2).str[-1]
+        levels = [("dept_id", "Dept_WAPE"), ("store_id", "Store_WAPE")]
+    else:
+        levels = [(c, f"{c.title()}_WAPE") for c in ("functionality", "vendor") if c in df.columns]
 
     results = {}
     for model, m_df in df.groupby("model"):
-        # Department level aggregation
-        dept_agg = m_df.groupby(["dept", "ds"])[["y", "y_pred"]].sum()
-        dept_w = wape(dept_agg["y"], dept_agg["y_pred"])
-
-        # Store level aggregation
-        store_agg = m_df.groupby(["store", "ds"])[["y", "y_pred"]].sum()
-        store_w = wape(store_agg["y"], store_agg["y_pred"])
-
-        results[model] = {
-            "Dept_WAPE": round(dept_w, 4),
-            "Store_WAPE": round(store_w, 4),
-        }
+        result = {}
+        for key, output_name in levels:
+            group = m_df.groupby([key, "ds"])[["y", "y_pred"]].sum()
+            result[output_name] = round(wape(group["y"], group["y_pred"]), 4)
+        results[model] = result
     return results
 
 

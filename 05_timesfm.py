@@ -5,16 +5,16 @@ import pandas as pd
 from timesfm3 import TimesFM3Forecaster
 
 from config import CONFIG
-from utils import HORIZON, RuntimeTracker, get_device, get_rolling_cutoffs
+from utils import RuntimeTracker, get_device, get_rolling_cutoffs, future_dates
 
 MODEL_NAME = "google/timesfm-3.0-pytorch"
 
 
 def run_timesfm() -> pd.DataFrame:
     os.makedirs(CONFIG.results_dir, exist_ok=True)
-    df = pd.read_parquet(CONFIG.data_dir / "m5_subset.parquet")
+    df = pd.read_parquet(CONFIG.prepared_data_path)
 
-    cutoffs = get_rolling_cutoffs(df["ds"].max(), HORIZON, CONFIG.n_windows)
+    cutoffs = get_rolling_cutoffs(df["ds"].max(), CONFIG.horizon, CONFIG.n_windows)
     n_series = df["unique_id"].nunique()
 
     device = get_device()
@@ -37,10 +37,10 @@ def run_timesfm() -> pd.DataFrame:
         uids = sorted(series)
         contexts = [series[uid] for uid in uids]
         forecast_outputs = list(forecaster.predict_batch(
-            contexts=contexts, horizon=HORIZON, ts_ids=uids,
+            contexts=contexts, horizon=CONFIG.horizon, ts_ids=uids,
             return_quantiles=True, make_positive=True,
         ))
-        dates = pd.date_range(cutoff + pd.Timedelta(days=1), periods=HORIZON, freq="D")
+        dates = future_dates(cutoff)
         rows = []
         for f_out in forecast_outputs:
             uid = f_out.ts_id

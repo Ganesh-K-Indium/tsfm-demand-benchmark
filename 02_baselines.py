@@ -5,32 +5,32 @@ from statsforecast import StatsForecast
 from statsforecast.models import AutoETS, SeasonalNaive, CrostonOptimized
 
 from config import CONFIG
-from utils import HORIZON, SEASONALITY, RuntimeTracker, get_rolling_cutoffs
+from utils import RuntimeTracker, get_rolling_cutoffs
 
 
 def run_baselines() -> pd.DataFrame:
     os.makedirs(CONFIG.results_dir, exist_ok=True)
-    df = pd.read_parquet(CONFIG.data_dir / "m5_subset.parquet")
+    df = pd.read_parquet(CONFIG.prepared_data_path)
     df = df[["unique_id", "ds", "y"]].sort_values(["unique_id", "ds"])
 
-    cutoffs = get_rolling_cutoffs(df["ds"].max(), HORIZON, CONFIG.n_windows)
+    cutoffs = get_rolling_cutoffs(df["ds"].max(), CONFIG.horizon, CONFIG.n_windows)
     n_series = df["unique_id"].nunique()
 
     models = [
-        SeasonalNaive(season_length=SEASONALITY),
-        AutoETS(season_length=SEASONALITY),
+        SeasonalNaive(season_length=CONFIG.seasonality),
+        AutoETS(season_length=CONFIG.seasonality),
         CrostonOptimized(),
     ]
     # The smoke preset has very few series; avoid spawning a full loky pool.
     # This also keeps local runs reliable on Python builds with limited IPC support.
-    sf = StatsForecast(models=models, freq="D", n_jobs=1)
+    sf = StatsForecast(models=models, freq=CONFIG.frequency, n_jobs=1)
 
     print(f"Fitting statistical baselines on {n_series} series across {len(cutoffs)} windows...")
     frames = []
     with RuntimeTracker(model_name="Baselines", n_series=n_series * len(cutoffs)) as tracker:
         for cutoff in cutoffs:
             hist = df[df["ds"] <= cutoff]
-            fcst = sf.forecast(df=hist, h=HORIZON)
+            fcst = sf.forecast(df=hist, h=CONFIG.horizon)
             long_window = fcst.melt(id_vars=["unique_id", "ds"], var_name="model", value_name="y_pred")
             long_window["model"] = long_window["model"].replace({"CrostonOptimized": "Croston"})
             long_window["cutoff"] = cutoff

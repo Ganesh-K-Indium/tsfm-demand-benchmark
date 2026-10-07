@@ -9,6 +9,9 @@ class BenchmarkConfig:
     results_dir: Path = Path("./results")
     horizon: int = 28
     seasonality: int = 7
+    dataset: str = "m5"
+    frequency: str = "D"
+    date_unit: str = "days"
     quantile_levels: list[float] = (0.1, 0.5, 0.9)
 
     # Supply Chain / Inventory Cost Parameters
@@ -25,6 +28,24 @@ class BenchmarkConfig:
         "standard": {"n_stores": 2, "n_items_per_dept": 12}, # ~168 series, robust statistical sample
         "extended": {"n_stores": 3, "n_items_per_dept": 25}, # ~525 series, comprehensive evaluation
     }
+
+    def configure_dataset(self, dataset: str) -> None:
+        """Set dataset-specific cadence, horizon, storage, and seasonality."""
+        if dataset == "m5":
+            self.dataset, self.frequency, self.date_unit = "m5", "D", "days"
+            self.horizon, self.seasonality = 28, 7
+            self.results_dir = Path("./results")
+        elif dataset == "tech_gadget":
+            self.dataset, self.frequency, self.date_unit = "tech_gadget", "W-MON", "weeks"
+            self.horizon, self.seasonality = 13, 52
+            self.results_dir = Path("./results/tech_gadget")
+        else:
+            raise ValueError(f"Unsupported dataset: {dataset}")
+
+    @property
+    def prepared_data_path(self) -> Path:
+        name = "m5_subset.parquet" if self.dataset == "m5" else "tech_gadget.parquet"
+        return self.data_dir / name
 
 
 CONFIG = BenchmarkConfig()

@@ -5,16 +5,16 @@ import torch
 from chronos import Chronos2Pipeline, BaseChronosPipeline
 
 from config import CONFIG
-from utils import HORIZON, RuntimeTracker, get_device, get_rolling_cutoffs
+from utils import RuntimeTracker, get_device, get_rolling_cutoffs, forecast_end, future_dates
 
 MODEL_NAME = "amazon/chronos-2"
 
 
 def run_chronos() -> pd.DataFrame:
     os.makedirs(CONFIG.results_dir, exist_ok=True)
-    df = pd.read_parquet(CONFIG.data_dir / "m5_subset.parquet")
+    df = pd.read_parquet(CONFIG.prepared_data_path)
 
-    cutoffs = get_rolling_cutoffs(df["ds"].max(), HORIZON, CONFIG.n_windows)
+    cutoffs = get_rolling_cutoffs(df["ds"].max(), CONFIG.horizon, CONFIG.n_windows)
     n_series = df["unique_id"].nunique()
 
     device = get_device()
@@ -42,9 +42,12 @@ def run_chronos() -> pd.DataFrame:
     with RuntimeTracker(model_name="Chronos-2", n_series=n_series * len(cutoffs)) as tracker:
       for cutoff in cutoffs:
         hist = df[df["ds"] <= cutoff].copy()
-        future = df[(df["ds"] > cutoff) & (df["ds"] <= cutoff + pd.Timedelta(days=HORIZON))].copy()
+        future = df[(df["ds"] > cutoff) & (df["ds"] <= forecast_end(cutoff))].copy()
         if is_chronos2:
-            future_covs = [c for c in ["dow", "month", "is_weekend"] if c in future.columns]
+            candidate_covs = ["dow", "month", "is_weekend"]
+            if CONFIG.dataset == "tech_gadget":
+                candidate_covs = ["week_of_year", "year", "feat_main_page", "price"]
+            future_covs = [c for c in candidate_covs if c in future.columns]
             hist_df = hist[["unique_id", "ds", "y"] + future_covs].sort_values(["unique_id", "ds"])
             future_df = future[["unique_id", "ds"] + future_covs].sort_values(["unique_id", "ds"])
 
@@ -54,7 +57,7 @@ def run_chronos() -> pd.DataFrame:
                 id_column="unique_id",
                 timestamp_column="ds",
                 target="y",
-                prediction_length=HORIZON,
+                prediction_length=CONFIG.horizon,
                 quantile_levels=list(CONFIG.quantile_levels),
             )
             out = pd.DataFrame({
@@ -74,10 +77,10 @@ def run_chronos() -> pd.DataFrame:
             contexts = [torch.tensor(series[u], dtype=torch.float32) for u in uids]
             quantiles, mean = pipeline.predict_quantiles(
                 context=contexts,
-                prediction_length=HORIZON,
+                prediction_length=CONFIG.horizon,
                 quantile_levels=list(CONFIG.quantile_levels),
             )
-            dates = pd.date_range(hist["ds"].max() + pd.Timedelta(days=1), periods=HORIZON, freq="D")
+            dates = future_dates(cutoff)
             rows = []
             for i, uid in enumerate(uids):
                 for j, d in enumerate(dates):

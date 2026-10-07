@@ -8,20 +8,24 @@ import numpy as np
 import pandas as pd
 
 from config import CONFIG
-from utils import HORIZON, evaluate, get_rolling_cutoffs, hierarchical_wape, log_experiment, wape
+from utils import evaluate, get_rolling_cutoffs, hierarchical_wape, log_experiment, wape, forecast_end
 
 
 def run_evaluation():
-    data_path = CONFIG.data_dir / "m5_subset.parquet"
+    data_path = CONFIG.prepared_data_path
     if not data_path.exists():
         print(f"Error: {data_path} not found. Run 01_prepare_data.py first.")
         return None
 
     df = pd.read_parquet(data_path)
-    cutoffs = get_rolling_cutoffs(df["ds"].max(), HORIZON, CONFIG.n_windows)
+    cutoffs = get_rolling_cutoffs(df["ds"].max(), CONFIG.horizon, CONFIG.n_windows)
     actual_parts = []
     for cutoff in cutoffs:
-        part = df[(df["ds"] > cutoff) & (df["ds"] <= cutoff + pd.Timedelta(days=HORIZON))][["unique_id", "ds", "y"]].copy()
+        part = df[(df["ds"] > cutoff) & (df["ds"] <= forecast_end(cutoff))][["unique_id", "ds", "y"]].copy()
+        hierarchy_cols = [c for c in ["dept_id", "store_id", "functionality", "vendor"] if c in df.columns]
+        if hierarchy_cols:
+            metadata = df[["unique_id"] + hierarchy_cols].drop_duplicates("unique_id")
+            part = part.merge(metadata, on="unique_id", how="left", validate="many_to_one")
         part["cutoff"] = cutoff
         actual_parts.append(part)
     actuals = pd.concat(actual_parts, ignore_index=True)
@@ -100,7 +104,13 @@ def run_evaluation():
     plot_sample_series(df, fcsts, cutoffs[-1])
 
     # Log experiment run to history
-    log_experiment(agg, extra_params={"n_series": df["unique_id"].nunique(), "horizon": HORIZON, "n_windows": len(cutoffs)})
+    log_experiment(agg, extra_params={
+        "dataset": CONFIG.dataset,
+        "n_series": df["unique_id"].nunique(),
+        "horizon": CONFIG.horizon,
+        "frequency": CONFIG.frequency,
+        "n_windows": len(cutoffs),
+    })
 
     # Generate comprehensive markdown report
     generate_markdown_report(agg, seg_summary, df, fcsts)
@@ -184,7 +194,7 @@ def plot_sample_series(df: pd.DataFrame, fcsts: pd.DataFrame, cutoff: pd.Timesta
     if n_segs == 1:
         axes = [axes]
 
-    hist_start = cutoff - pd.Timedelta(days=56)
+    hist_start = cutoff - 2 * CONFIG.horizon * pd.tseries.frequencies.to_offset(CONFIG.frequency)
 
     for ax, seg_name in zip(axes, segments):
         sample_uids = df[df["segment"] == seg_name]["unique_id"].unique()
@@ -224,13 +234,17 @@ def generate_markdown_report(agg: pd.DataFrame, seg_summary: pd.DataFrame, df: p
     n_series = df["unique_id"].nunique()
     models = fcsts["model"].unique().tolist()
 
+    dataset_name = "Walmart M5" if CONFIG.dataset == "m5" else "Tech-gadget retailer (Demand Prediction in Retail)"
+    hierarchy_headers = [("Dept_WAPE", "Department WAPE"), ("Store_WAPE", "Store WAPE")] if CONFIG.dataset == "m5" else [("Functionality_WAPE", "Functionality WAPE"), ("Vendor_WAPE", "Vendor WAPE")]
+    table_headers = ["Model", "Pooled WAPE", "Macro WAPE", "MASE", "RMSE", "Inv. Loss (Cu=3, Co=1)"]
+    table_headers += [label for _, label in hierarchy_headers] + ["Throughput (s/s)"]
     report = f"""# 📈 Time Series Demand Forecasting Benchmark Report
 
 Generated automatically by `tsfm-demand-benchmark`.
 
-- **Dataset:** Walmart M5 retail sales
+- **Dataset:** {dataset_name}
 - **Number of Series:** {n_series}
-- **Forecast Horizon:** {HORIZON} days
+- **Forecast Horizon:** {CONFIG.horizon} {CONFIG.date_unit}
 - **Backtest Windows:** {CONFIG.n_windows}
 - **Models Evaluated:** {", ".join(models)}
 
@@ -238,23 +252,25 @@ Generated automatically by `tsfm-demand-benchmark`.
 
 ## 1. Overall Performance Leaderboard
 
-| Model | Pooled WAPE | Macro WAPE | MASE | RMSE | Inv. Loss (Cu=3, Co=1) | Dept WAPE | Store WAPE | Throughput (s/s) |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| {" | ".join(table_headers)} |
+| {" | ".join(":---:" for _ in table_headers)} |
 """
     for _, r in agg.iterrows():
         inv = f"{r['Inventory_Loss']:.3f}" if "Inventory_Loss" in r and pd.notna(r["Inventory_Loss"]) else "N/A"
-        dept = f"{r['Dept_WAPE']:.4f}" if "Dept_WAPE" in r and pd.notna(r["Dept_WAPE"]) else "N/A"
-        store = f"{r['Store_WAPE']:.4f}" if "Store_WAPE" in r and pd.notna(r["Store_WAPE"]) else "N/A"
+        hierarchy_values = "".join(
+            " | " + (f"{r[col]:.4f}" if col in r and pd.notna(r[col]) else "N/A")
+            for col, _ in hierarchy_headers
+        )
         tp = f"{r['throughput_s_sec']:.1f}" if "throughput_s_sec" in r and pd.notna(r["throughput_s_sec"]) else "N/A"
         macro = f"{r['Macro_WAPE']:.4f}" if "Macro_WAPE" in r and pd.notna(r["Macro_WAPE"]) else "N/A"
-        report += f"| **{r['model']}** | {r['WAPE']:.4f} | {macro} | {r['MASE']:.4f} | {r['RMSE']:.4f} | {inv} | {dept} | {store} | {tp} |\n"
+        report += f"| **{r['model']}** | {r['WAPE']:.4f} | {macro} | {r['MASE']:.4f} | {r['RMSE']:.4f} | {inv}{hierarchy_values} | {tp} |\n"
 
     report += """
 > [!TIP]
 > - **Pooled WAPE:** Total absolute error divided by total demand; high-volume series contribute more.
 > - **Macro WAPE:** Average of per-series WAPEs, so each series contributes equally. MASE is averaged per series and window.
 > - **Inventory Loss:** Asymmetric Newsvendor cost penalizing stockouts 3x more heavily than overstock.
-> - **Dept & Store WAPE:** Measures whether individual item forecasts sum coherently at aggregate levels.
+> - **Hierarchy WAPE:** Measures whether SKU forecasts aggregate coherently by department/store (M5) or functionality/vendor (tech gadget).
 
 ---
 

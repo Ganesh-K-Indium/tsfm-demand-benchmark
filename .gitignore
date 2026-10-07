@@ -44,9 +44,13 @@ checkpoints/
 
 # Local dataset & benchmark artifacts
 data/
-results/*.parquet
-results/*.csv
-results/*.png
+*.part
+results/**/*.parquet
+results/**/*.csv
+results/**/*.png
+results/**/BENCHMARK_REPORT.md
+results/**/runtime_profiles.json
+results/**/experiment_history.json
 !results/.gitkeep
 
 # IDEs & Editors
@@ -61,4 +65,3 @@ results/*.png
 .AppleDouble
 .LSOverride
 ._*
-
