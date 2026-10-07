@@ -1,12 +1,14 @@
 """Comprehensive evaluation, visualization, hierarchical aggregation, and automated report generation."""
 import json
 import os
+import matplotlib
+matplotlib.use("Agg")  # Headless benchmark runs must not initialize the macOS GUI backend.
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
 from config import CONFIG
-from utils import HORIZON, evaluate, hierarchical_wape, log_experiment, wape
+from utils import HORIZON, evaluate, get_rolling_cutoffs, hierarchical_wape, log_experiment, wape
 
 
 def run_evaluation():
@@ -16,8 +18,13 @@ def run_evaluation():
         return None
 
     df = pd.read_parquet(data_path)
-    cutoff = df["ds"].max() - pd.Timedelta(days=HORIZON)
-    actuals = df[df["ds"] > cutoff][["unique_id", "ds", "y"]].copy()
+    cutoffs = get_rolling_cutoffs(df["ds"].max(), HORIZON, CONFIG.n_windows)
+    actual_parts = []
+    for cutoff in cutoffs:
+        part = df[(df["ds"] > cutoff) & (df["ds"] <= cutoff + pd.Timedelta(days=HORIZON))][["unique_id", "ds", "y"]].copy()
+        part["cutoff"] = cutoff
+        actual_parts.append(part)
+    actuals = pd.concat(actual_parts, ignore_index=True)
 
     forecast_files = [
         (CONFIG.results_dir / "baselines_forecast.parquet", "Baselines"),
@@ -40,10 +47,15 @@ def run_evaluation():
     fcsts = pd.concat(loaded_dfs, ignore_index=True)
 
     # Train history dictionary for MASE calculation
-    y_hist = {
-        uid: g.sort_values("ds")["y"].to_numpy()
-        for uid, g in df[df["ds"] <= cutoff].groupby("unique_id")
-    }
+    y_hist = {}
+    for cutoff in cutoffs:
+        for uid, g in df[df["ds"] <= cutoff].groupby("unique_id"):
+            y_hist[(cutoff, uid)] = g.sort_values("ds")["y"].to_numpy()
+    # Also retain the latest training history for older forecast files without
+    # an explicit cutoff column.
+    latest_cutoff = cutoffs[-1]
+    for uid, g in df[df["ds"] <= latest_cutoff].groupby("unique_id"):
+        y_hist[uid] = g.sort_values("ds")["y"].to_numpy()
 
     agg, per_series = evaluate(fcsts, actuals, y_hist)
 
@@ -85,10 +97,10 @@ def run_evaluation():
 
     # Generate charts
     plot_macro_metrics(agg)
-    plot_sample_series(df, fcsts, cutoff)
+    plot_sample_series(df, fcsts, cutoffs[-1])
 
     # Log experiment run to history
-    log_experiment(agg, extra_params={"n_series": df["unique_id"].nunique(), "horizon": HORIZON})
+    log_experiment(agg, extra_params={"n_series": df["unique_id"].nunique(), "horizon": HORIZON, "n_windows": len(cutoffs)})
 
     # Generate comprehensive markdown report
     generate_markdown_report(agg, seg_summary, df, fcsts)
@@ -164,6 +176,8 @@ def plot_macro_metrics(agg: pd.DataFrame):
 
 def plot_sample_series(df: pd.DataFrame, fcsts: pd.DataFrame, cutoff: pd.Timestamp):
     """Plot sample series predictions with shaded intervals across segments."""
+    if "cutoff" in fcsts.columns:
+        fcsts = fcsts[fcsts["cutoff"] == cutoff]
     segments = df["segment"].unique()
     n_segs = len(segments)
     fig, axes = plt.subplots(n_segs, 1, figsize=(14, 4 * n_segs), sharex=False)
@@ -217,25 +231,28 @@ Generated automatically by `tsfm-demand-benchmark`.
 - **Dataset:** Walmart M5 retail sales
 - **Number of Series:** {n_series}
 - **Forecast Horizon:** {HORIZON} days
+- **Backtest Windows:** {CONFIG.n_windows}
 - **Models Evaluated:** {", ".join(models)}
 
 ---
 
 ## 1. Overall Performance Leaderboard
 
-| Model | WAPE | MASE | RMSE | Inv. Loss (Cu=3, Co=1) | Dept WAPE | Store WAPE | Throughput (s/s) |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Model | Pooled WAPE | Macro WAPE | MASE | RMSE | Inv. Loss (Cu=3, Co=1) | Dept WAPE | Store WAPE | Throughput (s/s) |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 """
     for _, r in agg.iterrows():
         inv = f"{r['Inventory_Loss']:.3f}" if "Inventory_Loss" in r and pd.notna(r["Inventory_Loss"]) else "N/A"
         dept = f"{r['Dept_WAPE']:.4f}" if "Dept_WAPE" in r and pd.notna(r["Dept_WAPE"]) else "N/A"
         store = f"{r['Store_WAPE']:.4f}" if "Store_WAPE" in r and pd.notna(r["Store_WAPE"]) else "N/A"
         tp = f"{r['throughput_s_sec']:.1f}" if "throughput_s_sec" in r and pd.notna(r["throughput_s_sec"]) else "N/A"
-        report += f"| **{r['model']}** | {r['WAPE']:.4f} | {r['MASE']:.4f} | {r['RMSE']:.4f} | {inv} | {dept} | {store} | {tp} |\n"
+        macro = f"{r['Macro_WAPE']:.4f}" if "Macro_WAPE" in r and pd.notna(r["Macro_WAPE"]) else "N/A"
+        report += f"| **{r['model']}** | {r['WAPE']:.4f} | {macro} | {r['MASE']:.4f} | {r['RMSE']:.4f} | {inv} | {dept} | {store} | {tp} |\n"
 
     report += """
 > [!TIP]
-> - **WAPE & MASE:** Measure point forecast precision.
+> - **Pooled WAPE:** Total absolute error divided by total demand; high-volume series contribute more.
+> - **Macro WAPE:** Average of per-series WAPEs, so each series contributes equally. MASE is averaged per series and window.
 > - **Inventory Loss:** Asymmetric Newsvendor cost penalizing stockouts 3x more heavily than overstock.
 > - **Dept & Store WAPE:** Measures whether individual item forecasts sum coherently at aggregate levels.
 

@@ -25,6 +25,10 @@ def get_device() -> str:
 
 def get_rolling_cutoffs(max_date: pd.Timestamp, horizon: int = HORIZON, n_windows: int = 1) -> list[pd.Timestamp]:
     """Generate rolling-origin cutoff dates for multi-window backtesting."""
+    if horizon <= 0:
+        raise ValueError("horizon must be positive")
+    if n_windows <= 0:
+        raise ValueError("n_windows must be positive")
     return [max_date - pd.Timedelta(int(horizon * (i + 1)), unit="D") for i in reversed(range(n_windows))]
 
 
@@ -192,13 +196,24 @@ def hierarchical_wape(forecast: pd.DataFrame, actuals: pd.DataFrame) -> dict[str
 
 def evaluate(forecast: pd.DataFrame, actuals: pd.DataFrame,
              y_hist_by_id: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Comprehensive evaluation including WAPE, MASE, RMSE, and Asymmetric Inventory Loss."""
-    df = forecast.merge(actuals, on=["unique_id", "ds"], how="inner")
+    """Evaluate forecasts; WAPE is pooled, while Macro_WAPE equally weights series."""
+    join_cols = ["unique_id", "ds"]
+    has_windows = "cutoff" in forecast.columns and "cutoff" in actuals.columns
+    if has_windows:
+        join_cols.append("cutoff")
+    df = forecast.merge(actuals, on=join_cols, how="inner")
     rows = []
     has_intervals = "q10" in df.columns and "q90" in df.columns
 
-    for (uid, model), g in df.groupby(["unique_id", "model"]):
-        y_hist = y_hist_by_id.get(uid, np.array([]))
+    group_cols = (["cutoff"] if has_windows else []) + ["unique_id", "model"]
+    for keys, g in df.groupby(group_cols):
+        keys = keys if isinstance(keys, tuple) else (keys,)
+        offset = 0
+        cutoff = keys[offset] if has_windows else None
+        offset += int(has_windows)
+        uid, model = keys[offset:offset + 2]
+        hist_key = (cutoff, uid) if has_windows else uid
+        y_hist = y_hist_by_id.get(hist_key, y_hist_by_id.get(uid, np.array([])))
         res = {
             "unique_id": uid,
             "model": model,
@@ -207,6 +222,8 @@ def evaluate(forecast: pd.DataFrame, actuals: pd.DataFrame,
             "RMSE": rmse(g["y"], g["y_pred"]),
             "Inventory_Loss": asymmetric_inventory_loss(g["y"], g["y_pred"]),
         }
+        if has_windows:
+            res["cutoff"] = cutoff
         if has_intervals and g["q10"].notna().all() and g["q90"].notna().all():
             res["Coverage_80"] = interval_coverage(g["y"], g["q10"], g["q90"])
             res["Winkler_80"] = winkler_score(g["y"], g["q10"], g["q90"], alpha=0.2)
@@ -214,8 +231,6 @@ def evaluate(forecast: pd.DataFrame, actuals: pd.DataFrame,
 
     per_series = pd.DataFrame(rows)
     agg_dict = {
-        "WAPE": "mean",
-        "MASE": "mean",
         "RMSE": "mean",
         "Inventory_Loss": "mean",
     }
@@ -223,12 +238,14 @@ def evaluate(forecast: pd.DataFrame, actuals: pd.DataFrame,
         agg_dict["Coverage_80"] = "mean"
         agg_dict["Winkler_80"] = "mean"
 
-    agg = (
-        per_series.groupby("model")
-        .agg(**{k: (k, fn) for k, fn in agg_dict.items()})
-        .round(4)
-        .reset_index()
-    )
+    agg = per_series.groupby("model").agg(
+        **{k: (k, fn) for k, fn in agg_dict.items()},
+        Macro_WAPE=("WAPE", "mean"),
+        MASE=("MASE", "mean"),
+    ).reset_index()
+    pooled = {model: wape(g["y"], g["y_pred"]) for model, g in df.groupby("model")}
+    agg["WAPE"] = agg["model"].map(pooled)
+    agg = agg.round(4)
     return agg, per_series
 
 

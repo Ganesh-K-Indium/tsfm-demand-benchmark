@@ -5,7 +5,7 @@ import torch
 from chronos import Chronos2Pipeline, BaseChronosPipeline
 
 from config import CONFIG
-from utils import HORIZON, RuntimeTracker, get_device
+from utils import HORIZON, RuntimeTracker, get_device, get_rolling_cutoffs
 
 MODEL_NAME = "amazon/chronos-2"
 
@@ -14,10 +14,8 @@ def run_chronos() -> pd.DataFrame:
     os.makedirs(CONFIG.results_dir, exist_ok=True)
     df = pd.read_parquet(CONFIG.data_dir / "m5_subset.parquet")
 
-    cutoff = df["ds"].max() - pd.Timedelta(days=HORIZON)
-    hist = df[df["ds"] <= cutoff].copy()
-    future = df[df["ds"] > cutoff].copy()
-    n_series = hist["unique_id"].nunique()
+    cutoffs = get_rolling_cutoffs(df["ds"].max(), HORIZON, CONFIG.n_windows)
+    n_series = df["unique_id"].nunique()
 
     device = get_device()
     dtype = torch.bfloat16 if device == "cuda" else torch.float32
@@ -39,11 +37,15 @@ def run_chronos() -> pd.DataFrame:
         )
         is_chronos2 = False
 
-    print(f"Running Chronos inference on {n_series} series...")
-    with RuntimeTracker(model_name="Chronos-2", n_series=n_series) as tracker:
+    print(f"Running Chronos inference on {n_series} series across {len(cutoffs)} windows...")
+    frames = []
+    with RuntimeTracker(model_name="Chronos-2", n_series=n_series * len(cutoffs)) as tracker:
+      for cutoff in cutoffs:
+        hist = df[df["ds"] <= cutoff].copy()
+        future = df[(df["ds"] > cutoff) & (df["ds"] <= cutoff + pd.Timedelta(days=HORIZON))].copy()
         if is_chronos2:
-            hist_df = hist[["unique_id", "ds", "y"]].sort_values(["unique_id", "ds"])
             future_covs = [c for c in ["dow", "month", "is_weekend"] if c in future.columns]
+            hist_df = hist[["unique_id", "ds", "y"] + future_covs].sort_values(["unique_id", "ds"])
             future_df = future[["unique_id", "ds"] + future_covs].sort_values(["unique_id", "ds"])
 
             fcst_df = pipeline.predict_df(
@@ -88,6 +90,10 @@ def run_chronos() -> pd.DataFrame:
                         max(0.0, float(quantiles[i, j, 2])),
                     ))
             out = pd.DataFrame(rows, columns=["unique_id", "ds", "model", "y_pred", "q10", "q90"])
+        out["cutoff"] = cutoff
+        frames.append(out)
+
+    out = pd.concat(frames, ignore_index=True)
 
     out_path = CONFIG.results_dir / "chronos_forecast.parquet"
     out.to_parquet(out_path)
