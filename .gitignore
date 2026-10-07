@@ -51,6 +51,7 @@ results/**/*.png
 results/**/BENCHMARK_REPORT.md
 results/**/runtime_profiles.json
 results/**/experiment_history.json
+!results/m5/runtime_profiles.json
 !results/.gitkeep
 
 # IDEs & Editors

@@ -6,7 +6,7 @@ from pathlib import Path
 @dataclass
 class BenchmarkConfig:
     data_dir: Path = Path("./data")
-    results_dir: Path = Path("./results")
+    results_dir: Path = Path("./results/m5")
     horizon: int = 28
     seasonality: int = 7
     dataset: str = "m5"
@@ -34,7 +34,7 @@ class BenchmarkConfig:
         if dataset == "m5":
             self.dataset, self.frequency, self.date_unit = "m5", "D", "days"
             self.horizon, self.seasonality = 28, 7
-            self.results_dir = Path("./results")
+            self.results_dir = Path("./results/m5")
         elif dataset == "tech_gadget":
             self.dataset, self.frequency, self.date_unit = "tech_gadget", "W-MON", "weeks"
             self.horizon, self.seasonality = 13, 52

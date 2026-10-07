@@ -36,7 +36,7 @@ flowchart LR
     B --> F["05_timesfm.py\n(Google TimesFM 3.0)"]
     
     C & D & E & F --> G["06_evaluate.py\n(Accuracy, Inventory Loss, Visuals)"]
-    G --> H["results/BENCHMARK_REPORT.md\n& Comparison Charts"]
+    G --> H["results/{dataset}/BENCHMARK_REPORT.md\n& Comparison Charts"]
 ```
 
 ---
@@ -121,17 +121,12 @@ Evaluation uses a 28-day daily horizon for M5 and a 13-week horizon for the tech
 
 ## 📈 Generated Artifacts
 
-Execution automatically generates outputs in `./results/` for M5 and `./results/tech_gadget/` for the gadget dataset:
+Execution automatically generates outputs in `./results/m5/` for M5 and `./results/tech_gadget/` for the gadget dataset:
 
 ```
 results/
-├── BENCHMARK_REPORT.md         # 📋 Complete Markdown performance report with leaderboards
-├── benchmark_comparison.png    # 📊 4-panel comparison bar charts (WAPE, MASE, Inv. Loss, Throughput)
-├── sample_series_forecasts.png # 📈 Forecast vs. Actual overlay with shaded 80% prediction intervals
-├── benchmark_summary.csv       # 🔢 Macro metric table for downstream analysis
-├── per_series_summary.csv      # 🔍 Granular per-SKU performance data
-├── runtime_profiles.json       # ⏱️ System latency, throughput, and hardware profiles
-└── experiment_history.json     # 📜 Historical record of all experiment runs
+├── m5/                         # M5 forecasts, reports, charts, summaries, and runtime profiles
+└── tech_gadget/                # Tech-gadget forecasts and corresponding outputs
 ```
 
 ---

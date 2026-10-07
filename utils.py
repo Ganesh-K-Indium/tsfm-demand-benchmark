@@ -97,7 +97,7 @@ class RuntimeTracker:
         }
 
     def save_profile(self):
-        """Append runtime benchmark stats to results/runtime_profiles.json."""
+        """Append runtime benchmark stats to the selected dataset's result folder."""
         os.makedirs(CONFIG.results_dir, exist_ok=True)
         file_path = CONFIG.results_dir / "runtime_profiles.json"
         data = {}
@@ -268,7 +268,7 @@ def evaluate(forecast: pd.DataFrame, actuals: pd.DataFrame,
 
 
 def log_experiment(agg_df: pd.DataFrame, extra_params: dict | None = None):
-    """Log experiment execution to results/experiment_history.json."""
+    """Log experiment execution to the selected dataset's result folder."""
     os.makedirs(CONFIG.results_dir, exist_ok=True)
     history_file = CONFIG.results_dir / "experiment_history.json"
     history = []
